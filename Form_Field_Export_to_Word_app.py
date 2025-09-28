@@ -358,13 +358,15 @@ def toggle_all_options():
 def main_app():
     """The main Streamlit application function with multi-step logic."""
 
-    st.title("Excel Export to Word Form Generator")
+    st.title("📝 Excel Export to Word Form Generator")
     st.markdown(
-        "Upload your IQSMS Form/Field export (Excel) to generate Word document forms and ECCAIRS mapping summaries.")
+        "Ruben Inion")
+    st.markdown(
+        "Upload your iQSMS Form/Field export (Excel) to generate Word document forms and ECCAIRS mapping summaries.")
 
     # 1. User Input for Output Folder Name
     folder_name = st.text_input(
-        "Enter the base name for your output documents/zip file:",
+        "Enter the base name for your output documents/zip file (e.g. Customer code):",
         st.session_state.get('folder_name', "IQSMS_Forms_Export"),
         key='input_folder_name',
         help="This name will be used to prefix the generated Word files."
