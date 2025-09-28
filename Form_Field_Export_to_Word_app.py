@@ -387,7 +387,7 @@ def main_app():
 
     # PHASE 1: Upload and Pre-process
     if uploaded_file is not None and st.session_state.get('processed_excel_bytes') is None:
-        if st.button("1. Start Pre-processing & Identify Large Fields", key='btn_preprocess'):
+        if st.button("1. Start Pre-processing", key='btn_preprocess'):
             # Reset state for a new file/process start
             reset_app_state()  # Use the comprehensive reset function
 
