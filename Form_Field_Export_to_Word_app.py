@@ -40,6 +40,13 @@ def process_excel_st(uploaded_file, sheet_name="Worksheet", start_row=1):
         # Load workbook from the uploaded file's bytes buffer
         workbook_data = uploaded_file.read()
         wb = openpyxl.load_workbook(io.BytesIO(workbook_data))
+
+        # Check if the required sheet exists
+        if sheet_name not in wb.sheetnames:
+            st_display_error("Error",
+                             f"Sheet '{sheet_name}' not found in the uploaded file. Available sheets: {', '.join(wb.sheetnames)}")
+            return None, None
+
         sheet = wb[sheet_name]
 
         st.info("Starting Excel Pre-processing...")
@@ -50,12 +57,14 @@ def process_excel_st(uploaded_file, sheet_name="Worksheet", start_row=1):
         # Step 1: Find the "Bird species" row and determine the actual end_row
         bird_species_found_at_row = None
         for row_index in range(start_row, sheet.max_row + 1):
+            # Check cell 7 (G) for "Bird species"
             cell_value_col7 = sheet.cell(row=row_index, column=7).value
             if isinstance(cell_value_col7, str) and cell_value_col7.strip() == "Bird species":
                 bird_species_found_at_row = row_index
                 break
 
         if bird_species_found_at_row is not None:
+            # Check cell 8 (H) for "Position ID"
             position_id_value = sheet.cell(row=bird_species_found_at_row, column=8).value
             if position_id_value is None or str(position_id_value).strip() == "":
                 st.write(
@@ -71,18 +80,20 @@ def process_excel_st(uploaded_file, sheet_name="Worksheet", start_row=1):
         if end_row_for_processing < start_row:
             st_display_warning("Excel Processing Warning",
                                f"Calculated end row for processing ({end_row_for_processing}) is less than start_row ({start_row}). No filling operations will be performed.")
+            # Still save the workbook in case it had header content
             output_buffer = io.BytesIO()
             wb.save(output_buffer)
             return output_buffer.getvalue(), set()
 
         if end_row_for_processing >= start_row:
-            # Fill blank cells in columns 1 to 10
+            # Fill blank cells in columns 1 to 10 (excluding headers, hence start_row + 1)
             st.write("Filling blanks in columns 1-10...")
             for col_index in range(1, 11):
                 col_letter = get_column_letter(col_index)
                 for row_index in range(start_row + 1, end_row_for_processing + 1):
                     current_cell = sheet[f"{col_letter}{row_index}"]
-                    if current_cell.value is None or str(current_cell.value).strip() == "":
+                    if current_cell.value is None or (
+                            isinstance(current_cell.value, str) and current_cell.value.strip() == ""):
                         above_cell = sheet[f"{col_letter}{row_index - 1}"]
                         current_cell.value = above_cell.value
 
@@ -115,12 +126,14 @@ def process_excel_st(uploaded_file, sheet_name="Worksheet", start_row=1):
             for row_index in range(start_row + 1, end_row_for_processing + 1):
                 col_10_value = sheet.cell(row=row_index, column=10).value
                 try:
+                    # Column 6 (F) is 'Field ID', which is sometimes numeric
                     col_6_value = int(sheet.cell(row=row_index, column=6).value)
                 except (ValueError, TypeError):
                     col_6_value = None
 
+                # Condition: Field Type is "Dropdown select" (Col 10) AND Field ID (Col 6) is in the valid list
                 if col_10_value == "Dropdown select" and col_6_value in valid_values:
-                    for col_index in range(14, 16):  # Checks only columns 14 and 15
+                    for col_index in range(14, 16):  # Checks columns N (14) and O (15)
                         col_letter = get_column_letter(col_index)
                         current_cell = sheet[f"{col_letter}{row_index}"]
                         if current_cell.value is None:
@@ -141,6 +154,7 @@ def process_excel_st(uploaded_file, sheet_name="Worksheet", start_row=1):
         return output_buffer.getvalue(), valid_values
 
     except KeyError:
+        # This is now handled with an explicit check above, but keeping the catch-all
         st_display_error("Error", f"Sheet '{sheet_name}' not found in the uploaded file.")
         return None, None
     except Exception as e:
@@ -161,8 +175,10 @@ def create_forms_from_excel_st(excel_bytes, folder_name):
         st.info("Starting Word Form Generation...")
 
         # Column standardization (remains the same)
+        # Using .astype(str) before .fillna("") ensures pandas objects are treated as strings
         df["Form Description"] = df["Form Description"].astype(str).fillna("")
         df["Section"] = df["Section"].astype(str).fillna("")
+        # Replace 'nan' string representations resulting from fillna('') or .astype(str) on NaN/None
         df["Subsection Header"] = df["Subsection Header"].astype(str).replace("nan", "n/a").fillna("")
         df["Field ID"] = df["Field ID"].astype(str).fillna("")
         df["Field Description"] = df["Field Description"].astype(str).fillna("")
@@ -180,6 +196,7 @@ def create_forms_from_excel_st(excel_bytes, folder_name):
             document = Document()
             document.add_heading(f'Form: {form_desc} [{form_id}]', level=0)
 
+            # Sort sections by their minimum Position ID
             unique_sections = form_group.groupby(form_group['Section'].astype(str))[
                 'Position ID'].min().sort_values().index
 
@@ -187,17 +204,18 @@ def create_forms_from_excel_st(excel_bytes, folder_name):
                 section_group = form_group[form_group['Section'].astype(str) == section]
                 document.add_heading(section, level=1)
 
+                # Sort subsections by their minimum Position ID
                 unique_subsections = section_group.groupby(section_group['Subsection Header'].astype(str))[
                     'Position ID'].min().sort_values().index
 
                 for subsection_header in unique_subsections:
-                    if str(subsection_header).strip().lower() != "n/a" and str(subsection_header).strip() != "":
+                    if str(subsection_header).strip().lower() not in ("n/a", ""):
                         document.add_heading(subsection_header, level=2)
                         subsection_group = section_group[
                             section_group['Subsection Header'].astype(str) == subsection_header]
                     else:
                         subsection_group = section_group[
-                            (section_group['Subsection Header'].astype(str).str.strip().lower() == "n/a") |
+                            (section_group['Subsection Header'].astype(str).str.strip().str.lower() == "n/a") |
                             (section_group['Subsection Header'].astype(str).str.strip() == "")
                             ]
                         if subsection_group.empty:
@@ -205,11 +223,12 @@ def create_forms_from_excel_st(excel_bytes, folder_name):
 
                     processed_field_ids_for_current_subsection = set()
 
+                    # Get unique fields in the current subsection, sorted by Position ID
                     unique_fields_in_subsection = subsection_group.sort_values(
                         by="Position ID").drop_duplicates(subset=["Field ID"])
 
                     for index, row in unique_fields_in_subsection.iterrows():
-                        field_id = row["Field ID"]
+                        field_id = str(row["Field ID"])  # Ensure Field ID is treated as a string for comparison
                         field_desc = row["Field Description"]
                         field_type = row["Field Type"]
                         is_mandatory = str(row.get("Mandatory", "")).strip().upper() == "T"
@@ -224,10 +243,11 @@ def create_forms_from_excel_st(excel_bytes, folder_name):
                             p.add_run(f'{display_field_desc}: ').bold = True
                             p.add_run(f'[{field_type}; {field_id}]')
 
+                            # Fetch options unique to this Field ID
                             options_for_field = df[
                                 (df["Field ID"].astype(str) == field_id) &
                                 (df["Option"].astype(str).str.lower() != "n/a") &
-                                (df["Option"].notna())
+                                (df["Option"].notna())  # Filter out pandas NaT/NaN before str conversion if possible
                                 ]["Option"].unique().tolist()
 
                             if options_for_field:
@@ -276,6 +296,7 @@ def create_forms_from_excel_st(excel_bytes, folder_name):
             document.save(doc_buffer)
             doc_buffer.seek(0)
 
+            # Clean filenames
             clean_form_desc = "".join(x for x in form_desc if x.isalnum() or x.isspace()).strip().replace(" ", "_")
             clean_form_id = "".join(x for x in str(form_id) if x.isalnum() or x.isspace()).strip().replace(" ", "_")
             output_filename = f"{clean_form_id}_{today_date_str}_{clean_form_desc}_form.docx"
@@ -298,11 +319,14 @@ def create_forms_from_excel_st(excel_bytes, folder_name):
 
 
 # --- ECCAIRS Mappings Documents (Simplified placeholders) ---
+# NOTE: The implementation for these functions is a placeholder and does not perform
+# actual data processing/analysis for the mapping content.
+
 def create_eccairs_mappings_document_st(excel_bytes, folder_name):
     try:
-        doc_buffer = io.BytesIO(b'ECCAIRS Mappings Document Content')
+        doc_buffer = io.BytesIO(f'ECCAIRS Mappings Document Content for {folder_name}'.encode('utf-8'))
         output_filename = f"{folder_name}_Eccairs2_mappings.docx"
-        st.success("✅ ECCAIRS Mappings document generated.")
+        st.success("✅ ECCAIRS Mappings document generated (Placeholder).")
         return (output_filename, doc_buffer.getvalue())
     except Exception:
         return None
@@ -310,9 +334,9 @@ def create_eccairs_mappings_document_st(excel_bytes, folder_name):
 
 def create_eccairs_dropdown_mappings_document_st(excel_bytes, folder_name):
     try:
-        doc_buffer = io.BytesIO(b'ECCAIRS Dropdown Mappings Document Content')
+        doc_buffer = io.BytesIO(f'ECCAIRS Dropdown Mappings Document Content for {folder_name}'.encode('utf-8'))
         output_filename = f"{folder_name}_Eccairs_dropdown_mappings.docx"
-        st.success("✅ ECCAIRS Dropdown Mappings document generated.")
+        st.success("✅ ECCAIRS Dropdown Mappings document generated (Placeholder).")
         return (output_filename, doc_buffer.getvalue())
     except Exception:
         return None
@@ -320,9 +344,13 @@ def create_eccairs_dropdown_mappings_document_st(excel_bytes, folder_name):
 
 def create_missing_eccairs_mappings_document_st(excel_bytes, folder_name, valid_field_ids):
     try:
-        doc_buffer = io.BytesIO(b'Missing ECCAIRS Mappings Document Content')
+        # Note: The logic for calculating "missing" ECCAIRS mappings based on valid_field_ids
+        # is omitted here as it requires complex analysis of the Excel data beyond what's done in the placeholder.
+        doc_buffer = io.BytesIO(
+            f'Missing ECCAIRS Mappings Document Content for {folder_name} (Field IDs checked: {len(valid_field_ids)})'.encode(
+                'utf-8'))
         output_filename = f"{folder_name}_Missing_Eccairs_mappings.docx"
-        st.success("✅ Missing ECCAIRS Mappings document generated.")
+        st.success("✅ Missing ECCAIRS Mappings document generated (Placeholder).")
         return (output_filename, doc_buffer.getvalue())
     except Exception:
         return None
@@ -346,6 +374,7 @@ def reset_app_state():
 
 def toggle_all_options():
     """Callback function to set all large option choices based on the Select All state."""
+    # The 'select_all_large_options' value in st.session_state is the new value after the toggle.
     select_all = st.session_state['select_all_large_options']
 
     if 'large_dropdowns' in st.session_state and st.session_state['large_dropdowns']:
@@ -358,9 +387,51 @@ def toggle_all_options():
 def main_app():
     """The main Streamlit application function with multi-step logic."""
 
+    # 💡 Inject custom CSS for the green and red buttons
+    st.markdown("""
+    <style>
+    /* ---------------------------------------------------------------------- */
+    /* CSS for the GREEN button (Confirm Configuration and Generate Documents) */
+    /* It uses type="secondary" for targeting */
+    /* ---------------------------------------------------------------------- */
+    div.stButton button[kind="secondary"] {
+        background-color: #4CAF50; /* Green background */
+        color: white; /* White text */
+        border-color: #4CAF50;
+    }
+    div.stButton button[kind="secondary"]:hover {
+        background-color: #45a049 !important; /* Slightly darker green on hover */
+        border-color: #45a049 !important;
+        color: white !important;
+    }
+    div.stButton button[kind="secondary"]:focus {
+        box-shadow: 0 0 0 0.2rem rgba(76, 175, 80, 0.5); /* Green focus ring */
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* CSS for the RED button (Start Over with a New File) */
+    /* We target the button explicitly using its Streamlit key (btn_start_over) */
+    /* This specificity is required to override the default/green styling. */
+    /* ---------------------------------------------------------------------- */
+    div[data-testid="stButton-btn_start_over"] > button {
+        background-color: #D32F2F !important; /* Red background */
+        color: white !important; /* White text */
+        border-color: #D32F2F !important;
+    }
+    div[data-testid="stButton-btn_start_over"] > button:hover {
+        background-color: #B71C1C !important; /* Darker red on hover */
+        border-color: #B71C1C !important;
+        color: white !important;
+    }
+    div[data-testid="stButton-btn_start_over"] > button:focus {
+        box-shadow: 0 0 0 0.2rem rgba(211, 47, 47, 0.5) !important; /* Red focus ring */
+        border-color: #D32F2F !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
     st.title("📝 Excel Export to Word Form Generator")
-    st.markdown(
-        "Ruben Inion")
+    st.markdown("Ruben Inion")
     st.markdown(
         "Upload your iQSMS Form/Field export (Excel) to generate Word document forms and ECCAIRS mapping summaries.")
 
@@ -377,7 +448,7 @@ def main_app():
 
     # 2. File Uploader
     uploaded_file = st.file_uploader(
-        "Choose an Excel file (.xlsx or .xls)",
+        "Choose a form/field Excel file (.xlsx or .xls)",
         type=['xlsx', 'xls'],
         accept_multiple_files=False,
         key='file_uploader'
@@ -386,10 +457,12 @@ def main_app():
     st.markdown("---")
 
     # PHASE 1: Upload and Pre-process
+    # Check if a file is uploaded AND if the processed data is NOT yet in state
     if uploaded_file is not None and st.session_state.get('processed_excel_bytes') is None:
         if st.button("1. Start Pre-processing", key='btn_preprocess'):
             # Reset state for a new file/process start
-            reset_app_state()  # Use the comprehensive reset function
+            # Ensure folder name and file_uploader key are *not* reset here
+            reset_app_state()
 
             with st.spinner("Processing Excel and identifying fields..."):
                 processed_excel_bytes, valid_values = process_excel_st(uploaded_file)
@@ -399,23 +472,37 @@ def main_app():
                     st.session_state['valid_values'] = valid_values
 
                     # Identify large dropdowns here
-                    temp_df = pd.read_excel(io.BytesIO(processed_excel_bytes))
-                    large_dropdowns = []
-                    for (field_id, field_desc, field_type) in temp_df[
-                        ["Field ID", "Field Description", "Field Type"]].drop_duplicates().itertuples(index=False):
-                        if str(field_type).strip().lower() == "dropdown select":
+                    try:
+                        temp_df = pd.read_excel(io.BytesIO(processed_excel_bytes))
+                        large_dropdowns = []
+                        # Iterate over unique Field IDs that are 'Dropdown select'
+                        unique_dropdowns = temp_df[temp_df["Field Type"].astype(
+                            str).str.strip().str.lower() == "dropdown select"].drop_duplicates(subset=["Field ID"])[
+                            ["Field ID", "Field Description"]]
+
+                        for index, row in unique_dropdowns.iterrows():
+                            field_id = str(row["Field ID"])
+                            field_desc = row["Field Description"]
+
+                            # Count the unique options for this field ID
                             options_count = temp_df[
-                                (temp_df["Field ID"].astype(str) == str(field_id)) &
-                                (temp_df["Option"].astype(str).str.lower() != "n/a")
+                                (temp_df["Field ID"].astype(str) == field_id) &
+                                (temp_df["Option"].astype(str).str.lower() != "n/a") &
+                                (temp_df["Option"].notna())
                                 ]["Option"].nunique()
 
                             if options_count > 50:
-                                large_dropdowns.append((str(field_id), field_desc, options_count))
+                                large_dropdowns.append((field_id, field_desc, options_count))
 
-                    st.session_state['large_dropdowns'] = large_dropdowns
-                    st.success("Pre-processing complete. Proceed to Step 2 to configure form generation.")
-                    st.session_state['file_processed'] = True
-                    st.rerun()  # Rerun to move to Phase 2
+                        st.session_state['large_dropdowns'] = large_dropdowns
+                        st.success("Pre-processing complete. Proceed to Step 2 to configure form generation.")
+                        st.session_state['file_processed'] = True
+                        st.rerun()  # Rerun to move to Phase 2
+                    except Exception as e:
+                        st_display_error("Data Analysis Error",
+                                         f"Failed to analyze processed data for large dropdowns: {e}")
+                        # Clear the processed data to force re-upload
+                        st.session_state['processed_excel_bytes'] = None
 
     # PHASE 2: Configure Large Options (The Pause)
     if st.session_state.get('processed_excel_bytes') is not None and not st.session_state.get('config_done', False):
@@ -446,21 +533,21 @@ def main_app():
                 for field_id, field_desc, count in large_dropdowns:
                     key = f'config_choice_{field_id}'
 
-                    # 1. Initialize the choice if not present
+                    # 1. Initialize the choice if not present (this happens on the first run of Phase 2)
                     if key not in st.session_state:
-                        # Use the 'select all' state as the default
+                        # Use the 'select all' state as the default initial value
                         st.session_state[key] = st.session_state.get('select_all_large_options', False)
 
                     # 2. Draw the checkbox
-                    # CRITICAL FIX: Since st.session_state[key] is already set (by initialization OR by the callback),
-                    # we must NOT pass the 'value' argument. Streamlit will automatically use the value from st.session_state[key].
+                    # Explicitly set the value from state
                     st.checkbox(
                         f"Display all **{count}** options for **'{field_desc}'** (ID: {field_id})?",
+                        value=st.session_state[key],
                         key=key
-                        # Streamlit reads the value from st.session_state[key] and writes new changes back here.
                     )
 
-            if st.button("2. Confirm Configuration and Generate Documents"):
+            # NOTE: The custom CSS for the green button is applied via type="secondary"
+            if st.button("2. Confirm Configuration and Generate Documents", type="secondary"):
                 st.session_state['config_done'] = True
                 st.rerun()  # Rerun to move to the next step
 
@@ -479,6 +566,7 @@ def main_app():
                     st.session_state['folder_name']
                 )
 
+                # The placeholder functions use the same excel_bytes, even if not fully processed
                 eccairs_mapping_file = create_eccairs_mappings_document_st(
                     st.session_state['processed_excel_bytes'],
                     st.session_state['folder_name']
@@ -549,15 +637,17 @@ def main_app():
                     key="download_all_zip"
                 )
 
-    # --- START OVER BUTTON ---
-    st.markdown("---")
-    if st.button("🔄 Start Over with a New File", key="btn_start_over"):
-        reset_app_state()
-        st.rerun()
+        # --- START OVER BUTTON (MOVED HERE) ---
+        st.markdown("---")
+        # This button is now correctly placed in Phase 3 and styled red by the CSS block.
+        if st.button("🔄 Start Over with a New File", key="btn_start_over"):
+            reset_app_state()
+            st.rerun()
 
 
 if __name__ == "__main__":
     # Initialize session state variables for multi-step persistence
+    # Use explicit initialization for all necessary keys
     if 'processed_excel_bytes' not in st.session_state:
         st.session_state['processed_excel_bytes'] = None
     if 'valid_values' not in st.session_state:
