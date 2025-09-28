@@ -7,9 +7,11 @@ import os
 import re
 import zipfile
 from docx import Document
-from docx.shared import Inches, RGBColor
+from docx.shared import Inches, RGBColor, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from datetime import date
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
 
 # Set Streamlit page configuration
 st.set_page_config(
@@ -29,6 +31,49 @@ def st_display_warning(title, message):
 def st_display_error(title, message):
     """Replaces tkinter.messagebox.showerror with Streamlit equivalent."""
     st.error(f"**{title}**\n\n{message}")
+
+
+def add_cell_border(cell, color_rgb=(0x00, 0x00, 0x00), size_pt=4):
+    """Helper to add borders to a docx table cell."""
+    tc = cell._tc
+    tcPr = tc.get_or_add_tcPr()
+
+    # Define border attributes
+    borders = ['top', 'left', 'bottom', 'right']
+    for border in borders:
+        # Create the border element
+        tag = qn(
+            f'w:{border}')
+        e = OxmlElement(tag)
+        e.set(qn('w:val'), 'single')  # Border style
+        e.set(qn('w:sz'), str(size_pt))  # Size in 1/8 of a point
+        e.set(qn('w:space'), '0')
+        e.set(qn('w:color'), f'{color_rgb[0]:02X}{color_rgb[1]:02X}{color_rgb[2]:02X}')  # Color in hex
+        tcPr.append(e)
+
+
+# --- REVISED: Aggressive Text cleaning for DOCX insertion ---
+def safe_text_for_docx(value):
+    """
+    Converts a value to string and strips characters that can cause XML parsing errors
+    in python-docx, such as control characters and stray XML/HTML fragments.
+    """
+    if value is None:
+        return ""
+
+    s = str(value)
+
+    # 1. Remove non-ASCII/non-printable control characters using encode/decode
+    s = s.encode('ascii', 'ignore').decode('ascii')
+
+    # 2. Clean up common XML/HTML-like fragments that cause the reported error
+    # Target the known fragments like '{http'
+    s = re.sub(r'\{http.*?\}', '', s, flags=re.IGNORECASE)
+    s = re.sub(r'<[^>]+>', '', s)  # Remove stray HTML/XML tags
+    s = s.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&') # Decode basic HTML entities
+
+    # 3. Explicitly remove non-breaking spaces (can also cause issues) and trim
+    return s.replace('\xa0', ' ').strip()
 
 
 # --- Excel Pre-processing Function (PHASE 1) ---
@@ -83,6 +128,7 @@ def process_excel_st(uploaded_file, sheet_name="Worksheet", start_row=1):
             # Still save the workbook in case it had header content
             output_buffer = io.BytesIO()
             wb.save(output_buffer)
+            # The second return value (valid_values) is not used if processing is skipped, but we return an empty set for consistency.
             return output_buffer.getvalue(), set()
 
         if end_row_for_processing >= start_row:
@@ -108,6 +154,7 @@ def process_excel_st(uploaded_file, sheet_name="Worksheet", start_row=1):
                     col_d_cell.value = "(empty subsection)"
 
         # Define valid values for column 6 for conditional filling of columns 14-15
+        # NOTE: This list of Field IDs (valid_values) is still needed for conditional filling in the Excel processing.
         valid_values = {10, 11, 12, 14, 15, 17, 18, 19, 28, 29, 30, 94, 103, 104, 107, 108, 109, 117,
                         119, 120, 122, 128, 130, 131, 142, 160, 168, 170, 206, 208, 209, 212, 214, 216,
                         217, 220, 221, 222, 223, 224, 225, 226, 227, 228, 284, 292, 293, 311, 314, 315,
@@ -175,10 +222,8 @@ def create_forms_from_excel_st(excel_bytes, folder_name):
         st.info("Starting Word Form Generation...")
 
         # Column standardization (remains the same)
-        # Using .astype(str) before .fillna("") ensures pandas objects are treated as strings
         df["Form Description"] = df["Form Description"].astype(str).fillna("")
         df["Section"] = df["Section"].astype(str).fillna("")
-        # Replace 'nan' string representations resulting from fillna('') or .astype(str) on NaN/None
         df["Subsection Header"] = df["Subsection Header"].astype(str).replace("nan", "n/a").fillna("")
         df["Field ID"] = df["Field ID"].astype(str).fillna("")
         df["Field Description"] = df["Field Description"].astype(str).fillna("")
@@ -236,24 +281,26 @@ def create_forms_from_excel_st(excel_bytes, folder_name):
                         if field_id in processed_field_ids_for_current_subsection:
                             continue
 
-                        display_field_desc = f"{field_desc}*" if is_mandatory else field_desc
+                        # Apply safe_text_for_docx here for the display text as well, just in case
+                        display_field_desc = safe_text_for_docx(field_desc)
+                        display_field_desc = f"{display_field_desc}*" if is_mandatory else display_field_desc
+                        safe_field_id = safe_text_for_docx(field_id)
 
                         if field_type == "Dropdown select":
                             p = document.add_paragraph()
                             p.add_run(f'{display_field_desc}: ').bold = True
-                            p.add_run(f'[{field_type}; {field_id}]')
+                            p.add_run(f'[{field_type}; {safe_field_id}]')
 
                             # Fetch options unique to this Field ID
                             options_for_field = df[
                                 (df["Field ID"].astype(str) == field_id) &
                                 (df["Option"].astype(str).str.lower() != "n/a") &
-                                (df["Option"].notna())  # Filter out pandas NaT/NaN before str conversion if possible
+                                (df["Option"].notna())
                                 ]["Option"].unique().tolist()
 
                             if options_for_field:
                                 if len(options_for_field) > 50:
                                     # Read the stored choice made in Phase 2
-                                    # Use the same key format: config_choice_ID
                                     choice = st.session_state.get(f'config_choice_{field_id}', False)
 
                                     if choice:
@@ -261,7 +308,9 @@ def create_forms_from_excel_st(excel_bytes, folder_name):
                                         p_options_label.paragraph_format.left_indent = Inches(0.5)
 
                                         for option in options_for_field:
-                                            p_option_bullet = document.add_paragraph(option, style='List Bullet')
+                                            # Use safe_text_for_docx here for high-volume content
+                                            safe_option = safe_text_for_docx(option)
+                                            p_option_bullet = document.add_paragraph(safe_option, style='List Bullet')
                                             p_option_bullet.paragraph_format.left_indent = Inches(1.0)
                                     else:
                                         p_options_label = document.add_paragraph("Options:", style='Normal')
@@ -276,7 +325,9 @@ def create_forms_from_excel_st(excel_bytes, folder_name):
                                     p_options_label.paragraph_format.left_indent = Inches(0.5)
 
                                     for option in options_for_field:
-                                        p_option_bullet = document.add_paragraph(option, style='List Bullet')
+                                        # Use safe_text_for_docx here
+                                        safe_option = safe_text_for_docx(option)
+                                        p_option_bullet = document.add_paragraph(safe_option, style='List Bullet')
                                         p_option_bullet.paragraph_format.left_indent = Inches(1.0)
                             else:
                                 p_no_options = document.add_paragraph(
@@ -285,7 +336,7 @@ def create_forms_from_excel_st(excel_bytes, folder_name):
                         else:
                             p = document.add_paragraph()
                             p.add_run(f'{display_field_desc}: ').bold = True
-                            p.add_run(f'[{field_type}; {field_id}] ')
+                            p.add_run(f'[{field_type}; {safe_field_id}] ')
                             p.add_run('')
 
                         processed_field_ids_for_current_subsection.add(field_id)
@@ -301,7 +352,7 @@ def create_forms_from_excel_st(excel_bytes, folder_name):
             clean_form_id = "".join(x for x in str(form_id) if x.isalnum() or x.isspace()).strip().replace(" ", "_")
             output_filename = f"{clean_form_id}_{today_date_str}_{clean_form_desc}_form.docx"
 
-            generated_files.append((output_filename, doc_buffer.getvalue()))
+            generated_files.append((output_filename, doc_buffer.read()))
 
         if generated_files:
             st.success(f"✅ Successfully generated {len(generated_files)} Word forms.")
@@ -318,42 +369,14 @@ def create_forms_from_excel_st(excel_bytes, folder_name):
         return None
 
 
-# --- ECCAIRS Mappings Documents (Simplified placeholders) ---
-# NOTE: The implementation for these functions is a placeholder and does not perform
-# actual data processing/analysis for the mapping content.
+# ----------------------------------------------------------------------------------
+# --- ECCAIRS Mappings and Duplicates Documents (REMOVED as requested) ---
+# ----------------------------------------------------------------------------------
 
-def create_eccairs_mappings_document_st(excel_bytes, folder_name):
-    try:
-        doc_buffer = io.BytesIO(f'ECCAIRS Mappings Document Content for {folder_name}'.encode('utf-8'))
-        output_filename = f"{folder_name}_Eccairs2_mappings.docx"
-        st.success("✅ ECCAIRS Mappings document generated (Placeholder).")
-        return (output_filename, doc_buffer.getvalue())
-    except Exception:
-        return None
-
-
-def create_eccairs_dropdown_mappings_document_st(excel_bytes, folder_name):
-    try:
-        doc_buffer = io.BytesIO(f'ECCAIRS Dropdown Mappings Document Content for {folder_name}'.encode('utf-8'))
-        output_filename = f"{folder_name}_Eccairs_dropdown_mappings.docx"
-        st.success("✅ ECCAIRS Dropdown Mappings document generated (Placeholder).")
-        return (output_filename, doc_buffer.getvalue())
-    except Exception:
-        return None
-
-
-def create_missing_eccairs_mappings_document_st(excel_bytes, folder_name, valid_field_ids):
-    try:
-        # Note: The logic for calculating "missing" ECCAIRS mappings based on valid_field_ids
-        # is omitted here as it requires complex analysis of the Excel data beyond what's done in the placeholder.
-        doc_buffer = io.BytesIO(
-            f'Missing ECCAIRS Mappings Document Content for {folder_name} (Field IDs checked: {len(valid_field_ids)})'.encode(
-                'utf-8'))
-        output_filename = f"{folder_name}_Missing_Eccairs_mappings.docx"
-        st.success("✅ Missing ECCAIRS Mappings document generated (Placeholder).")
-        return (output_filename, doc_buffer.getvalue())
-    except Exception:
-        return None
+# REMOVED: def create_eccairs_mappings_document_st(...)
+# REMOVED: def create_eccairs_dropdown_mappings_document_st(...)
+# REMOVED: def create_missing_eccairs_mappings_document_st(...)
+# REMOVED: def create_potential_duplicate_fields_document_st(...)
 
 
 # --- Streamlit Main Application Logic (Multi-Phase) ---
@@ -433,7 +456,7 @@ def main_app():
     st.title("📝 Excel Export to Word Form Generator")
     st.markdown("Ruben Inion")
     st.markdown(
-        "Upload your iQSMS Form/Field export (Excel) to generate Word document forms and ECCAIRS mapping summaries.")
+        "Upload your iQSMS Form/Field export (Excel) to generate Word document forms.") # Adjusted description
 
     # 1. User Input for Output Folder Name
     folder_name = st.text_input(
@@ -461,10 +484,10 @@ def main_app():
     if uploaded_file is not None and st.session_state.get('processed_excel_bytes') is None:
         if st.button("1. Start Pre-processing", key='btn_preprocess'):
             # Reset state for a new file/process start
-            # Ensure folder name and file_uploader key are *not* reset here
             reset_app_state()
 
             with st.spinner("Processing Excel and identifying fields..."):
+                # Pass the uploaded file object directly, process_excel_st reads the bytes
                 processed_excel_bytes, valid_values = process_excel_st(uploaded_file)
 
                 if processed_excel_bytes is not None:
@@ -473,12 +496,14 @@ def main_app():
 
                     # Identify large dropdowns here
                     try:
+                        # Use the processed bytes to analyze the data
                         temp_df = pd.read_excel(io.BytesIO(processed_excel_bytes))
                         large_dropdowns = []
-                        # Iterate over unique Field IDs that are 'Dropdown select'
-                        unique_dropdowns = temp_df[temp_df["Field Type"].astype(
-                            str).str.strip().str.lower() == "dropdown select"].drop_duplicates(subset=["Field ID"])[
-                            ["Field ID", "Field Description"]]
+
+                        # Use the same column names as used in the generation functions
+                        unique_dropdowns = temp_df[
+                            temp_df["Field Type"].astype(str).str.strip().str.lower() == "dropdown select"
+                            ].drop_duplicates(subset=["Field ID"])[["Field ID", "Field Description"]]
 
                         for index, row in unique_dropdowns.iterrows():
                             field_id = str(row["Field ID"])
@@ -559,38 +584,19 @@ def main_app():
         # Run generation logic only once per configuration
         if st.session_state.get('generated_files') is None:
 
-            with st.spinner("Generating Word Forms and Mappings..."):
+            with st.spinner("Generating Word Forms..."):
                 # --- Generation ---
+
+                # 1. Main Form Generation
                 generated_forms = create_forms_from_excel_st(
                     st.session_state['processed_excel_bytes'],
                     st.session_state['folder_name']
                 )
 
-                # The placeholder functions use the same excel_bytes, even if not fully processed
-                eccairs_mapping_file = create_eccairs_mappings_document_st(
-                    st.session_state['processed_excel_bytes'],
-                    st.session_state['folder_name']
-                )
-
-                eccairs_dropdown_file = create_eccairs_dropdown_mappings_document_st(
-                    st.session_state['processed_excel_bytes'],
-                    st.session_state['folder_name']
-                )
-
-                missing_eccairs_file = create_missing_eccairs_mappings_document_st(
-                    st.session_state['processed_excel_bytes'],
-                    st.session_state['folder_name'],
-                    st.session_state['valid_values']
-                )
+                # All other document generations (ECCAIRS, Duplicates) have been removed.
 
                 # Consolidate results
                 all_generated_files = generated_forms if generated_forms else []
-                if eccairs_mapping_file:
-                    all_generated_files.append(eccairs_mapping_file)
-                if eccairs_dropdown_file:
-                    all_generated_files.append(eccairs_dropdown_file)
-                if missing_eccairs_file:
-                    all_generated_files.append(missing_eccairs_file)
 
                 st.session_state['generated_files'] = all_generated_files
                 st.success("Document generation complete! Use the buttons below to download.")
@@ -605,7 +611,7 @@ def main_app():
             # Individual Downloads
             st.markdown("##### Individual Documents:")
             for filename, file_bytes in all_files_to_zip:
-                label_prefix = "Form" if "form.docx" in filename else "Mapping"
+                label_prefix = "Form" # Only Forms are left
                 st.download_button(
                     label=f"⬇️ Download {label_prefix}: {filename}",
                     data=file_bytes,
@@ -625,7 +631,7 @@ def main_app():
 
                 clean_folder_name = "".join(
                     x for x in st.session_state['folder_name'] if x.isalnum() or x.isspace()).strip().replace(" ", "_")
-                zip_filename = f"{clean_folder_name}_Generated_Forms_and_Mappings.zip"
+                zip_filename = f"{clean_folder_name}_Generated_Forms.zip" # Updated zip filename
 
                 st.markdown("---")
                 st.subheader("All Files in One Zip")
@@ -647,7 +653,6 @@ def main_app():
 
 if __name__ == "__main__":
     # Initialize session state variables for multi-step persistence
-    # Use explicit initialization for all necessary keys
     if 'processed_excel_bytes' not in st.session_state:
         st.session_state['processed_excel_bytes'] = None
     if 'valid_values' not in st.session_state:
