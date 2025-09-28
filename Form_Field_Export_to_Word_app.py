@@ -97,7 +97,6 @@ def process_excel_st(uploaded_file, sheet_name="Worksheet", start_row=1):
                     col_d_cell.value = "(empty subsection)"
 
         # Define valid values for column 6 for conditional filling of columns 14-15
-        # (This list remains the same as it defines Eccairs-related fields)
         valid_values = {10, 11, 12, 14, 15, 17, 18, 19, 28, 29, 30, 94, 103, 104, 107, 108, 109, 117,
                         119, 120, 122, 128, 130, 131, 142, 160, 168, 170, 206, 208, 209, 212, 214, 216,
                         217, 220, 221, 222, 223, 224, 225, 226, 227, 228, 284, 292, 293, 311, 314, 315,
@@ -153,7 +152,7 @@ def process_excel_st(uploaded_file, sheet_name="Worksheet", start_row=1):
 def create_forms_from_excel_st(excel_bytes, folder_name):
     """
     Generates Word documents based on the processed Excel, reading large option choices
-    from st.session_state, NOT prompting the user.
+    from st.session_state.
     """
     try:
         # Read the Excel data from bytes into a DataFrame
@@ -233,7 +232,8 @@ def create_forms_from_excel_st(excel_bytes, folder_name):
 
                             if options_for_field:
                                 if len(options_for_field) > 50:
-                                    # CRITICAL CHANGE: Read the stored choice made in Phase 2
+                                    # Read the stored choice made in Phase 2
+                                    # Use the same key format: config_choice_ID
                                     choice = st.session_state.get(f'config_choice_{field_id}', False)
 
                                     if choice:
@@ -333,17 +333,19 @@ def create_missing_eccairs_mappings_document_st(excel_bytes, folder_name, valid_
 def reset_app_state():
     """Clears all processing-related keys from session state."""
     keys_to_delete = ['processed_excel_bytes', 'valid_values', 'config_done',
-                      'large_dropdowns', 'generated_files', 'file_processed',
-                      'select_all_large_options']  # Clear select all state
-
+                      'large_dropdowns', 'generated_files', 'file_processed', 'select_all_large_options']
     for key in keys_to_delete:
         if key in st.session_state:
             del st.session_state[key]
 
+    # Also clear all dynamic configuration keys
+    dynamic_keys = [k for k in st.session_state.keys() if k.startswith('config_choice_')]
+    for key in dynamic_keys:
+        del st.session_state[key]
+
 
 def toggle_all_options():
     """Callback function to set all large option choices based on the Select All state."""
-    # This function is correct as it only programmatically writes to state
     select_all = st.session_state['select_all_large_options']
 
     if 'large_dropdowns' in st.session_state and st.session_state['large_dropdowns']:
@@ -356,15 +358,13 @@ def toggle_all_options():
 def main_app():
     """The main Streamlit application function with multi-step logic."""
 
-    st.title("📝 Excel Export to Word Form Generator")
+    st.title("Excel Export to Word Form Generator")
     st.markdown(
-        "Ruben Inion")
-    st.markdown(
-        "Upload your iQSMS Form/Field export (Excel) to generate Word document forms and ECCAIRS mapping summaries.")
+        "Upload your IQSMS Form/Field export (Excel) to generate Word document forms and ECCAIRS mapping summaries.")
 
     # 1. User Input for Output Folder Name
     folder_name = st.text_input(
-        "Enter the base name for your output documents/zip file (e.g. Customer code):",
+        "Enter the base name for your output documents/zip file:",
         st.session_state.get('folder_name', "IQSMS_Forms_Export"),
         key='input_folder_name',
         help="This name will be used to prefix the generated Word files."
@@ -375,7 +375,7 @@ def main_app():
 
     # 2. File Uploader
     uploaded_file = st.file_uploader(
-        "Choose a form/field Excel file (.xlsx or .xls)",
+        "Choose an Excel file (.xlsx or .xls)",
         type=['xlsx', 'xls'],
         accept_multiple_files=False,
         key='file_uploader'
@@ -385,12 +385,9 @@ def main_app():
 
     # PHASE 1: Upload and Pre-process
     if uploaded_file is not None and st.session_state.get('processed_excel_bytes') is None:
-        if st.button("1. Start Pre-processing", key='btn_preprocess'):
+        if st.button("1. Start Pre-processing & Identify Large Fields", key='btn_preprocess'):
             # Reset state for a new file/process start
-            st.session_state['generated_files'] = None
-            st.session_state['config_done'] = False
-            st.session_state['large_dropdowns'] = []
-            st.session_state['select_all_large_options'] = False  # Reset select all choice
+            reset_app_state()  # Use the comprehensive reset function
 
             with st.spinner("Processing Excel and identifying fields..."):
                 processed_excel_bytes, valid_values = process_excel_st(uploaded_file)
@@ -399,7 +396,7 @@ def main_app():
                     st.session_state['processed_excel_bytes'] = processed_excel_bytes
                     st.session_state['valid_values'] = valid_values
 
-                    # Identify large dropdowns here (outside of the generation function)
+                    # Identify large dropdowns here
                     temp_df = pd.read_excel(io.BytesIO(processed_excel_bytes))
                     large_dropdowns = []
                     for (field_id, field_desc, field_type) in temp_df[
@@ -447,17 +444,18 @@ def main_app():
                 for field_id, field_desc, count in large_dropdowns:
                     key = f'config_choice_{field_id}'
 
-                    # CRITICAL FIX: Ensure the key exists in session state before drawing the widget.
-                    # This prevents Streamlit from setting a default value AND the callback from setting a value
-                    # in the same run, which is the source of the error.
+                    # 1. Initialize the choice if not present
                     if key not in st.session_state:
+                        # Use the 'select all' state as the default
                         st.session_state[key] = st.session_state.get('select_all_large_options', False)
 
-                    # Draw the checkbox: use the key argument, but DO NOT assign the result back to st.session_state[key]
+                    # 2. Draw the checkbox
+                    # CRITICAL FIX: Since st.session_state[key] is already set (by initialization OR by the callback),
+                    # we must NOT pass the 'value' argument. Streamlit will automatically use the value from st.session_state[key].
                     st.checkbox(
                         f"Display all **{count}** options for **'{field_desc}'** (ID: {field_id})?",
-                        value=st.session_state[key],  # Set the initial value from the existing session state
-                        key=key  # Streamlit updates st.session_state[key] automatically via this key
+                        key=key
+                        # Streamlit reads the value from st.session_state[key] and writes new changes back here.
                     )
 
             if st.button("2. Confirm Configuration and Generate Documents"):
